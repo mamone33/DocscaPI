@@ -3,6 +3,34 @@ import cv2
 import numpy as np
 from PIL import Image
 from io import BytesIO
+import zipfile
+
+
+# ============================================================
+# CONFIGURAÇÕES PADRÃO DOS SLIDERS
+# ============================================================
+
+VALORES_PADRAO = {
+    "brilho": 25,
+    "contraste": 1.4,
+    "tamanho_kernel": 5,
+    "threshold_valor": 127,
+    "canny_limiar1": 80,
+    "canny_limiar2": 160,
+    "bloco": 31,
+    "constante": 10,
+}
+
+
+def inicializar_sliders():
+    for chave, valor in VALORES_PADRAO.items():
+        if chave not in st.session_state:
+            st.session_state[chave] = valor
+
+
+def resetar_sliders():
+    for chave, valor in VALORES_PADRAO.items():
+        st.session_state[chave] = valor
 
 
 # ============================================================
@@ -10,38 +38,18 @@ from io import BytesIO
 # ============================================================
 
 def converter_para_cinza(imagem_rgb):
-    """
-    Converte a imagem colorida RGB para escala de cinza.
-    """
     return cv2.cvtColor(imagem_rgb, cv2.COLOR_RGB2GRAY)
 
 
 def equalizacao_histograma(imagem_cinza):
-    """
-    Melhora o contraste da imagem usando equalização de histograma.
-    """
     return cv2.equalizeHist(imagem_cinza)
 
 
 def ajustar_brilho_contraste(imagem, brilho=25, contraste=1.4):
-    """
-    Ajusta brilho e contraste da imagem.
-
-    brilho:
-        Valor positivo clareia.
-        Valor negativo escurece.
-
-    contraste:
-        Valores acima de 1 aumentam o contraste.
-        Valores abaixo de 1 reduzem o contraste.
-    """
     return cv2.convertScaleAbs(imagem, alpha=contraste, beta=brilho)
 
 
 def filtro_gaussiano(imagem, tamanho_kernel=5):
-    """
-    Aplica filtro Gaussiano para suavização e redução de ruído.
-    """
     if tamanho_kernel % 2 == 0:
         tamanho_kernel += 1
 
@@ -52,18 +60,10 @@ def filtro_gaussiano(imagem, tamanho_kernel=5):
 
 
 def detectar_bordas_canny(imagem, limiar1=80, limiar2=160):
-    """
-    Aplica detecção de bordas usando Canny.
-    """
     return cv2.Canny(imagem, limiar1, limiar2)
 
 
 def limiarizacao_threshold(imagem_cinza, valor=127):
-    """
-    Aplica threshold global.
-    Pixels acima do valor viram branco.
-    Pixels abaixo do valor viram preto.
-    """
     _, resultado = cv2.threshold(
         imagem_cinza,
         valor,
@@ -74,10 +74,6 @@ def limiarizacao_threshold(imagem_cinza, valor=127):
 
 
 def limiarizacao_otsu(imagem_cinza):
-    """
-    Aplica limiarização automática pelo método de Otsu.
-    O próprio algoritmo escolhe o melhor valor de corte.
-    """
     _, resultado = cv2.threshold(
         imagem_cinza,
         0,
@@ -88,10 +84,6 @@ def limiarizacao_otsu(imagem_cinza):
 
 
 def limiarizacao_adaptativa(imagem_cinza, bloco=31, constante=10):
-    """
-    Aplica limiarização adaptativa.
-    Boa para documentos com sombra ou iluminação irregular.
-    """
     if bloco % 2 == 0:
         bloco += 1
 
@@ -109,9 +101,6 @@ def limiarizacao_adaptativa(imagem_cinza, bloco=31, constante=10):
 
 
 def limpar_imagem_morfologia(imagem):
-    """
-    Aplica operação morfológica leve para remover pequenos ruídos.
-    """
     kernel = np.ones((2, 2), np.uint8)
     return cv2.morphologyEx(imagem, cv2.MORPH_OPEN, kernel)
 
@@ -124,35 +113,25 @@ def gerar_imagem_final_scanner(
     bloco=31,
     constante=10
 ):
-    """
-    Pipeline final para gerar uma imagem estilo scanner:
-    fundo mais claro e texto mais legível.
-    """
-
-    # 1. Equalização de histograma para melhorar contraste
     equalizada = equalizacao_histograma(imagem_cinza)
 
-    # 2. Ajuste de brilho e contraste
     ajustada = ajustar_brilho_contraste(
         equalizada,
         brilho=brilho,
         contraste=contraste
     )
 
-    # 3. Suavização para reduzir ruído
     suavizada = filtro_gaussiano(
         ajustada,
         tamanho_kernel=tamanho_kernel
     )
 
-    # 4. Limiarização adaptativa para destacar texto e clarear fundo
     final = limiarizacao_adaptativa(
         suavizada,
         bloco=bloco,
         constante=constante
     )
 
-    # 5. Limpeza morfológica leve
     final = limpar_imagem_morfologia(final)
 
     return final
@@ -169,10 +148,6 @@ def processar_documento(
     bloco=31,
     constante=10
 ):
-    """
-    Processa o documento e retorna todas as etapas do pipeline.
-    """
-
     cinza = converter_para_cinza(imagem_rgb)
 
     equalizada = equalizacao_histograma(cinza)
@@ -217,26 +192,40 @@ def processar_documento(
     )
 
     return {
-        "cinza": cinza,
-        "equalizada": equalizada,
-        "brilho_contraste": brilho_contraste,
-        "suavizada": suavizada,
-        "bordas": bordas,
-        "threshold_global": threshold_global,
-        "otsu": otsu,
-        "adaptativa": adaptativa,
-        "final": final
+        "01_original": imagem_rgb,
+        "02_escala_cinza": cinza,
+        "03_equalizacao_histograma": equalizada,
+        "04_brilho_contraste": brilho_contraste,
+        "05_filtro_gaussiano": suavizada,
+        "06_bordas_canny": bordas,
+        "07_threshold_global": threshold_global,
+        "08_limiarizacao_otsu": otsu,
+        "09_limiarizacao_adaptativa": adaptativa,
+        "10_imagem_final_scanner": final
     }
 
 
+# ============================================================
+# FUNÇÕES DE DOWNLOAD
+# ============================================================
+
 def converter_para_download(imagem):
-    """
-    Converte imagem NumPy para PNG baixável.
-    """
     imagem_pil = Image.fromarray(imagem)
     buffer = BytesIO()
     imagem_pil.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def gerar_zip_com_imagens(etapas):
+    buffer_zip = BytesIO()
+
+    with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for nome, imagem in etapas.items():
+            imagem_png = converter_para_download(imagem)
+            zip_file.writestr(f"{nome}.png", imagem_png)
+
+    buffer_zip.seek(0)
+    return buffer_zip.getvalue()
 
 
 # ============================================================
@@ -249,6 +238,11 @@ st.set_page_config(
     layout="wide"
 )
 
+inicializar_sliders()
+
+if "arquivo_carregado_anteriormente" not in st.session_state:
+    st.session_state.arquivo_carregado_anteriormente = False
+
 st.title("📄 DOCSCAN PI")
 st.write(
     "Ferramenta de digitalização e melhoria de documentos usando "
@@ -257,74 +251,95 @@ st.write(
 
 st.markdown("---")
 
-# Sidebar com controles
+arquivo = st.file_uploader(
+    "Carregue uma imagem de documento",
+    type=["jpg", "jpeg", "png"],
+    key="upload_imagem"
+)
+
+
+# ============================================================
+# RESET AUTOMÁTICO DOS SLIDERS AO REMOVER O ARQUIVO
+# ============================================================
+
+if arquivo is None and st.session_state.arquivo_carregado_anteriormente:
+    resetar_sliders()
+    st.session_state.arquivo_carregado_anteriormente = False
+    st.rerun()
+
+if arquivo is not None:
+    st.session_state.arquivo_carregado_anteriormente = True
+
+
+# ============================================================
+# SIDEBAR COM SLIDERS
+# ============================================================
+
 st.sidebar.header("Ajustes do processamento")
 
-brilho = st.sidebar.slider(
+st.sidebar.slider(
     "Brilho",
     min_value=-100,
     max_value=100,
-    value=25
+    key="brilho"
 )
 
-contraste = st.sidebar.slider(
+st.sidebar.slider(
     "Contraste",
     min_value=0.5,
     max_value=3.0,
-    value=1.4,
-    step=0.1
+    step=0.1,
+    key="contraste"
 )
 
-tamanho_kernel = st.sidebar.slider(
+st.sidebar.slider(
     "Filtro Gaussiano",
     min_value=3,
     max_value=15,
-    value=5,
-    step=2
+    step=2,
+    key="tamanho_kernel"
 )
 
-threshold_valor = st.sidebar.slider(
+st.sidebar.slider(
     "Threshold global",
     min_value=0,
     max_value=255,
-    value=127
+    key="threshold_valor"
 )
 
-canny_limiar1 = st.sidebar.slider(
+st.sidebar.slider(
     "Canny - Limiar inferior",
     min_value=0,
     max_value=255,
-    value=80
+    key="canny_limiar1"
 )
 
-canny_limiar2 = st.sidebar.slider(
+st.sidebar.slider(
     "Canny - Limiar superior",
     min_value=0,
     max_value=255,
-    value=160
+    key="canny_limiar2"
 )
 
-bloco = st.sidebar.slider(
+st.sidebar.slider(
     "Bloco da limiarização adaptativa",
     min_value=3,
     max_value=99,
-    value=31,
-    step=2
+    step=2,
+    key="bloco"
 )
 
-constante = st.sidebar.slider(
+st.sidebar.slider(
     "Constante da limiarização adaptativa",
     min_value=0,
     max_value=30,
-    value=10
+    key="constante"
 )
 
 
-arquivo = st.file_uploader(
-    "Carregue uma imagem de documento",
-    type=["jpg", "jpeg", "png"]
-)
-
+# ============================================================
+# PROCESSAMENTO
+# ============================================================
 
 if arquivo is not None:
     imagem_pil = Image.open(arquivo).convert("RGB")
@@ -332,14 +347,14 @@ if arquivo is not None:
 
     etapas = processar_documento(
         imagem_rgb,
-        brilho=brilho,
-        contraste=contraste,
-        threshold_valor=threshold_valor,
-        tamanho_kernel=tamanho_kernel,
-        canny_limiar1=canny_limiar1,
-        canny_limiar2=canny_limiar2,
-        bloco=bloco,
-        constante=constante
+        brilho=st.session_state.brilho,
+        contraste=st.session_state.contraste,
+        threshold_valor=st.session_state.threshold_valor,
+        tamanho_kernel=st.session_state.tamanho_kernel,
+        canny_limiar1=st.session_state.canny_limiar1,
+        canny_limiar2=st.session_state.canny_limiar2,
+        bloco=st.session_state.bloco,
+        constante=st.session_state.constante
     )
 
     st.subheader("Comparação antes e depois")
@@ -348,88 +363,75 @@ if arquivo is not None:
 
     with col1:
         st.image(
-            imagem_rgb,
+            etapas["01_original"],
             caption="Imagem original",
             use_container_width=True
         )
 
+        st.download_button(
+            label="Baixar imagem original",
+            data=converter_para_download(etapas["01_original"]),
+            file_name="01_original.png",
+            mime="image/png"
+        )
+
     with col2:
         st.image(
-            etapas["final"],
+            etapas["10_imagem_final_scanner"],
             caption="Imagem final processada - estilo scanner",
             use_container_width=True,
             channels="GRAY"
         )
 
+        st.download_button(
+            label="Baixar imagem final",
+            data=converter_para_download(etapas["10_imagem_final_scanner"]),
+            file_name="10_imagem_final_scanner.png",
+            mime="image/png"
+        )
+
+    st.markdown("---")
+
+    st.subheader("Download geral")
+
     st.download_button(
-        label="Baixar imagem final em PNG",
-        data=converter_para_download(etapas["final"]),
-        file_name="documento_processado.png",
-        mime="image/png"
+        label="Baixar todas as imagens em ZIP",
+        data=gerar_zip_com_imagens(etapas),
+        file_name="docscan_resultados.zip",
+        mime="application/zip"
     )
 
     st.markdown("---")
 
     st.subheader("Etapas do processamento")
 
-    col3, col4 = st.columns(2)
+    nomes_legiveis = {
+        "02_escala_cinza": "1. Escala de cinza",
+        "03_equalizacao_histograma": "2. Equalização de histograma",
+        "04_brilho_contraste": "3. Ajuste de brilho e contraste",
+        "05_filtro_gaussiano": "4. Filtro Gaussiano",
+        "06_bordas_canny": "5. Detecção de bordas - Canny",
+        "07_threshold_global": "6. Threshold global",
+        "08_limiarizacao_otsu": "7. Limiarização de Otsu",
+        "09_limiarizacao_adaptativa": "8. Limiarização adaptativa",
+        "10_imagem_final_scanner": "9. Resultado final estilo scanner"
+    }
 
-    with col3:
+    for nome_arquivo, titulo in nomes_legiveis.items():
+        st.markdown(f"### {titulo}")
+
         st.image(
-            etapas["cinza"],
-            caption="1. Escala de cinza",
+            etapas[nome_arquivo],
             use_container_width=True,
             channels="GRAY"
         )
 
-        st.image(
-            etapas["equalizada"],
-            caption="2. Equalização de histograma",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-        st.image(
-            etapas["threshold_global"],
-            caption="5. Threshold global",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-        st.image(
-            etapas["adaptativa"],
-            caption="7. Limiarização adaptativa",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-    with col4:
-        st.image(
-            etapas["brilho_contraste"],
-            caption="3. Ajuste de brilho e contraste",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-        st.image(
-            etapas["suavizada"],
-            caption="4. Filtro Gaussiano",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-        st.image(
-            etapas["otsu"],
-            caption="6. Limiarização de Otsu",
-            use_container_width=True,
-            channels="GRAY"
-        )
-
-        st.image(
-            etapas["bordas"],
-            caption="8. Detecção de bordas - Canny",
-            use_container_width=True,
-            channels="GRAY"
+        st.download_button(
+            label=f"Baixar {titulo}",
+            data=converter_para_download(etapas[nome_arquivo]),
+            file_name=f"{nome_arquivo}.png",
+            mime="image/png",
+            key=f"download_{nome_arquivo}"
         )
 
     st.success("Processamento concluído com sucesso.")
