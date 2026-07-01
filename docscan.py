@@ -1,97 +1,239 @@
-import streamlit as st
-import cv2
-import numpy as np
-from PIL import Image
 from io import BytesIO
 import zipfile
 
-
-# ============================================================
-# CONFIGURAÇÕES PADRÃO DOS SLIDERS
-# ============================================================
-
-VALORES_PADRAO = {
-    "brilho": 25,
-    "contraste": 1.4,
-    "tamanho_kernel": 5,
-    "threshold_valor": 127,
-    "canny_limiar1": 80,
-    "canny_limiar2": 160,
-    "bloco": 31,
-    "constante": 10,
-}
-
-
-def inicializar_sliders():
-    for chave, valor in VALORES_PADRAO.items():
-        if chave not in st.session_state:
-            st.session_state[chave] = valor
-
-
-def resetar_sliders():
-    for chave, valor in VALORES_PADRAO.items():
-        st.session_state[chave] = valor
+import cv2
+import numpy as np
+import streamlit as st
+from PIL import Image
 
 
 # ============================================================
-# FUNÇÕES DE PROCESSAMENTO DE IMAGEM
+# UTILIDADES
 # ============================================================
 
-def converter_para_cinza(imagem_rgb):
+def garantir_kernel_impar(valor, minimo=3):
+    valor = int(valor)
+    if valor < minimo:
+        valor = minimo
+    if valor % 2 == 0:
+        valor += 1
+    return valor
+
+
+def rgb_para_cinza(imagem_rgb):
     return cv2.cvtColor(imagem_rgb, cv2.COLOR_RGB2GRAY)
 
 
-def equalizacao_histograma(imagem_cinza):
-    return cv2.equalizeHist(imagem_cinza)
+def imagem_para_png(imagem):
+    buffer = BytesIO()
+
+    if len(imagem.shape) == 2:
+        imagem_pil = Image.fromarray(imagem)
+    else:
+        imagem_pil = Image.fromarray(imagem)
+
+    imagem_pil.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
-def ajustar_brilho_contraste(imagem, brilho=25, contraste=1.4):
-    return cv2.convertScaleAbs(imagem, alpha=contraste, beta=brilho)
+def imagem_para_pdf(imagem):
+    buffer = BytesIO()
+
+    if len(imagem.shape) == 2:
+        imagem_pil = Image.fromarray(imagem).convert("RGB")
+    else:
+        imagem_pil = Image.fromarray(imagem).convert("RGB")
+
+    imagem_pil.save(buffer, format="PDF", resolution=100.0)
+    return buffer.getvalue()
 
 
-def filtro_gaussiano(imagem, tamanho_kernel=5):
-    if tamanho_kernel % 2 == 0:
-        tamanho_kernel += 1
+def gerar_zip(etapas):
+    buffer = BytesIO()
 
-    if tamanho_kernel < 3:
-        tamanho_kernel = 3
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for nome, imagem in etapas.items():
+            zip_file.writestr(f"{nome}.png", imagem_para_png(imagem))
 
-    return cv2.GaussianBlur(imagem, (tamanho_kernel, tamanho_kernel), 0)
+        zip_file.writestr(
+            "resultado_final.pdf",
+            imagem_para_pdf(etapas["07_resultado_final"])
+        )
+
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
-def detectar_bordas_canny(imagem, limiar1=80, limiar2=160):
-    return cv2.Canny(imagem, limiar1, limiar2)
+# ============================================================
+# DETECCAO E CORRECAO DO DOCUMENTO
+# ============================================================
+
+def ordenar_pontos(pontos):
+    """
+    Ordena os quatro pontos do documento em:
+    superior esquerdo, superior direito, inferior direito, inferior esquerdo.
+    """
+    pontos = pontos.reshape(4, 2).astype("float32")
+
+    retangulo = np.zeros((4, 2), dtype="float32")
+
+    soma = pontos.sum(axis=1)
+    diferenca = np.diff(pontos, axis=1)
+
+    retangulo[0] = pontos[np.argmin(soma)]
+    retangulo[2] = pontos[np.argmax(soma)]
+    retangulo[1] = pontos[np.argmin(diferenca)]
+    retangulo[3] = pontos[np.argmax(diferenca)]
+
+    return retangulo
 
 
-def limiarizacao_threshold(imagem_cinza, valor=127):
-    _, resultado = cv2.threshold(
-        imagem_cinza,
-        valor,
-        255,
-        cv2.THRESH_BINARY
+def transformar_perspectiva(imagem, pontos):
+    """
+    Aplica transformacao de perspectiva para deixar o documento frontal,
+    centralizado e recortado.
+    """
+    retangulo = ordenar_pontos(pontos)
+    sup_esq, sup_dir, inf_dir, inf_esq = retangulo
+
+    largura_a = np.linalg.norm(inf_dir - inf_esq)
+    largura_b = np.linalg.norm(sup_dir - sup_esq)
+    largura = int(max(largura_a, largura_b))
+
+    altura_a = np.linalg.norm(sup_dir - inf_dir)
+    altura_b = np.linalg.norm(sup_esq - inf_esq)
+    altura = int(max(altura_a, altura_b))
+
+    destino = np.array([
+        [0, 0],
+        [largura - 1, 0],
+        [largura - 1, altura - 1],
+        [0, altura - 1]
+    ], dtype="float32")
+
+    matriz = cv2.getPerspectiveTransform(retangulo, destino)
+    documento = cv2.warpPerspective(imagem, matriz, (largura, altura))
+
+    return documento
+
+
+def detectar_documento(imagem_rgb, canny_min=50, canny_max=150):
+    """
+    Detecta o maior contorno quadrilateral compatível com documento.
+    Se falhar, retorna a imagem original como fallback.
+    """
+    altura_original = imagem_rgb.shape[0]
+    escala = altura_original / 700.0
+
+    largura_redimensionada = int(imagem_rgb.shape[1] / escala)
+    imagem_pequena = cv2.resize(imagem_rgb, (largura_redimensionada, 700))
+
+    cinza = rgb_para_cinza(imagem_pequena)
+    suavizada = cv2.GaussianBlur(cinza, (5, 5), 0)
+
+    bordas = cv2.Canny(suavizada, canny_min, canny_max)
+
+    kernel = np.ones((3, 3), np.uint8)
+    bordas_dilatadas = cv2.dilate(bordas, kernel, iterations=1)
+
+    contornos, _ = cv2.findContours(
+        bordas_dilatadas,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
     )
-    return resultado
+
+    contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
+
+    area_imagem = imagem_pequena.shape[0] * imagem_pequena.shape[1]
+    area_minima = area_imagem * 0.08
+
+    for contorno in contornos:
+        area = cv2.contourArea(contorno)
+
+        if area < area_minima:
+            continue
+
+        perimetro = cv2.arcLength(contorno, True)
+        aproximado = cv2.approxPolyDP(contorno, 0.02 * perimetro, True)
+
+        if len(aproximado) == 4:
+            pontos_originais = aproximado.reshape(4, 2).astype("float32") * escala
+            documento = transformar_perspectiva(imagem_rgb, pontos_originais)
+
+            return {
+                "documento": documento,
+                "detectado": True,
+                "bordas": bordas,
+                "bordas_dilatadas": bordas_dilatadas,
+                "pontos": pontos_originais
+            }
+
+    return {
+        "documento": imagem_rgb,
+        "detectado": False,
+        "bordas": bordas,
+        "bordas_dilatadas": bordas_dilatadas,
+        "pontos": None
+    }
 
 
-def limiarizacao_otsu(imagem_cinza):
-    _, resultado = cv2.threshold(
-        imagem_cinza,
+# ============================================================
+# MELHORIA DE LEGIBILIDADE
+# ============================================================
+
+def corrigir_iluminacao(imagem_cinza):
+    """
+    Reduz sombras e iluminacao irregular usando fundo estimado por blur grande.
+    """
+    fundo = cv2.GaussianBlur(imagem_cinza, (0, 0), sigmaX=35, sigmaY=35)
+
+    corrigida = cv2.divide(imagem_cinza, fundo, scale=255)
+    corrigida = cv2.normalize(corrigida, None, 0, 255, cv2.NORM_MINMAX)
+
+    return corrigida.astype("uint8")
+
+
+def melhorar_legibilidade(imagem_rgb, brilho=8, contraste=1.15):
+    """
+    Gera versao em cinza aprimorada preservando detalhes finos.
+    Usa correcao de iluminacao, CLAHE, brilho/contraste e suavizacao leve.
+    """
+    cinza = rgb_para_cinza(imagem_rgb)
+
+    sem_sombra = corrigir_iluminacao(cinza)
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    melhorada = clahe.apply(sem_sombra)
+
+    melhorada = cv2.convertScaleAbs(
+        melhorada,
+        alpha=float(contraste),
+        beta=int(brilho)
+    )
+
+    melhorada = cv2.bilateralFilter(melhorada, 7, 35, 35)
+
+    return melhorada
+
+
+def gerar_scanner_pb(imagem_cinza, bloco=31, constante=11):
+    """
+    Gera uma versao preto e branco estilo scanner.
+    Evita agressividade excessiva aplicando suavizacao e morfologia leve.
+    """
+    bloco = garantir_kernel_impar(bloco, minimo=3)
+
+    suavizada = cv2.GaussianBlur(imagem_cinza, (3, 3), 0)
+
+    otsu = cv2.threshold(
+        suavizada,
         0,
         255,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-    return resultado
+    )[1]
 
-
-def limiarizacao_adaptativa(imagem_cinza, bloco=31, constante=10):
-    if bloco % 2 == 0:
-        bloco += 1
-
-    if bloco < 3:
-        bloco = 3
-
-    return cv2.adaptiveThreshold(
-        imagem_cinza,
+    adaptativa = cv2.adaptiveThreshold(
+        suavizada,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
@@ -99,156 +241,102 @@ def limiarizacao_adaptativa(imagem_cinza, bloco=31, constante=10):
         constante
     )
 
+    combinada = cv2.bitwise_and(otsu, adaptativa)
 
-def limpar_imagem_morfologia(imagem):
     kernel = np.ones((2, 2), np.uint8)
-    return cv2.morphologyEx(imagem, cv2.MORPH_OPEN, kernel)
+    limpa = cv2.morphologyEx(combinada, cv2.MORPH_OPEN, kernel)
+
+    return limpa
 
 
-def gerar_imagem_final_scanner(
-    imagem_cinza,
-    brilho=25,
-    contraste=1.4,
-    tamanho_kernel=5,
+def calcular_score_colorido(imagem_rgb):
+    """
+    Estima se o documento possui muitos detalhes coloridos.
+    CNH/RG/cartoes tendem a ter saturacao maior que folhas simples.
+    """
+    hsv = cv2.cvtColor(imagem_rgb, cv2.COLOR_RGB2HSV)
+    saturacao_media = hsv[:, :, 1].mean()
+
+    return saturacao_media
+
+
+def escolher_resultado_automatico(imagem_rgb, cinza_aprimorado, scanner_pb):
+    """
+    Modo Automatico inteligente:
+    - documentos coloridos/detalhados: prefere cinza aprimorado;
+    - folhas simples com texto escuro: prefere scanner P&B se a binarizacao ficou saudavel.
+    """
+    score_cor = calcular_score_colorido(imagem_rgb)
+    proporcao_preto = np.mean(scanner_pb < 128)
+
+    documento_colorido = score_cor > 35
+    binarizacao_saudavel = 0.03 <= proporcao_preto <= 0.45
+
+    if documento_colorido:
+        return cinza_aprimorado, "Cinza aprimorado"
+
+    if binarizacao_saudavel:
+        return scanner_pb, "Scanner P&B"
+
+    return cinza_aprimorado, "Cinza aprimorado"
+
+
+def gerar_resultado_final(
+    documento_rgb,
+    modo="Automático inteligente",
+    brilho=8,
+    contraste=1.15,
     bloco=31,
-    constante=10
+    constante=11
 ):
-    equalizada = equalizacao_histograma(imagem_cinza)
-
-    ajustada = ajustar_brilho_contraste(
-        equalizada,
+    """
+    Gera as tres versoes principais:
+    1. documento recortado/colorido;
+    2. cinza aprimorado;
+    3. scanner preto e branco suave.
+    """
+    cinza_aprimorado = melhorar_legibilidade(
+        documento_rgb,
         brilho=brilho,
         contraste=contraste
     )
 
-    suavizada = filtro_gaussiano(
-        ajustada,
-        tamanho_kernel=tamanho_kernel
-    )
-
-    final = limiarizacao_adaptativa(
-        suavizada,
+    scanner_pb = gerar_scanner_pb(
+        cinza_aprimorado,
         bloco=bloco,
         constante=constante
     )
 
-    final = limpar_imagem_morfologia(final)
+    if modo == "Colorido recortado":
+        final = documento_rgb
+        nome_final = "Colorido recortado"
 
-    return final
+    elif modo == "Cinza aprimorado":
+        final = cinza_aprimorado
+        nome_final = "Cinza aprimorado"
 
+    elif modo == "Scanner P&B":
+        final = scanner_pb
+        nome_final = "Scanner P&B"
 
-def processar_documento(
-    imagem_rgb,
-    brilho=25,
-    contraste=1.4,
-    threshold_valor=127,
-    tamanho_kernel=5,
-    canny_limiar1=80,
-    canny_limiar2=160,
-    bloco=31,
-    constante=10
-):
-    cinza = converter_para_cinza(imagem_rgb)
-
-    equalizada = equalizacao_histograma(cinza)
-
-    brilho_contraste = ajustar_brilho_contraste(
-        equalizada,
-        brilho=brilho,
-        contraste=contraste
-    )
-
-    suavizada = filtro_gaussiano(
-        brilho_contraste,
-        tamanho_kernel=tamanho_kernel
-    )
-
-    bordas = detectar_bordas_canny(
-        suavizada,
-        limiar1=canny_limiar1,
-        limiar2=canny_limiar2
-    )
-
-    threshold_global = limiarizacao_threshold(
-        suavizada,
-        valor=threshold_valor
-    )
-
-    otsu = limiarizacao_otsu(suavizada)
-
-    adaptativa = limiarizacao_adaptativa(
-        suavizada,
-        bloco=bloco,
-        constante=constante
-    )
-
-    final = gerar_imagem_final_scanner(
-        cinza,
-        brilho=brilho,
-        contraste=contraste,
-        tamanho_kernel=tamanho_kernel,
-        bloco=bloco,
-        constante=constante
-    )
+    else:
+        final, nome_final = escolher_resultado_automatico(
+            documento_rgb,
+            cinza_aprimorado,
+            scanner_pb
+        )
 
     return {
-        "01_original": imagem_rgb,
-        "02_escala_cinza": cinza,
-        "03_equalizacao_histograma": equalizada,
-        "04_brilho_contraste": brilho_contraste,
-        "05_filtro_gaussiano": suavizada,
-        "06_bordas_canny": bordas,
-        "07_threshold_global": threshold_global,
-        "08_limiarizacao_otsu": otsu,
-        "09_limiarizacao_adaptativa": adaptativa,
-        "10_imagem_final_scanner": final
+        "colorido": documento_rgb,
+        "cinza_aprimorado": cinza_aprimorado,
+        "scanner_pb": scanner_pb,
+        "final": final,
+        "modo_final": nome_final
     }
 
 
 # ============================================================
-# FUNÇÕES DE DOWNLOAD
-# ============================================================
-
-def converter_para_download(imagem):
-    imagem_pil = Image.fromarray(imagem)
-    buffer = BytesIO()
-    imagem_pil.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def gerar_pdf_da_imagem(imagem):
-    """
-    Gera um arquivo PDF a partir da imagem final processada.
-    """
-    imagem_pil = Image.fromarray(imagem)
-
-    if imagem_pil.mode != "RGB":
-        imagem_pil = imagem_pil.convert("RGB")
-
-    buffer_pdf = BytesIO()
-    imagem_pil.save(buffer_pdf, format="PDF", resolution=100.0)
-    buffer_pdf.seek(0)
-
-    return buffer_pdf.getvalue()
-
-
-def gerar_zip_com_imagens(etapas):
-    buffer_zip = BytesIO()
-
-    with zipfile.ZipFile(buffer_zip, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for nome, imagem in etapas.items():
-            imagem_png = converter_para_download(imagem)
-            zip_file.writestr(f"{nome}.png", imagem_png)
-
-        pdf_final = gerar_pdf_da_imagem(etapas["10_imagem_final_scanner"])
-        zip_file.writestr("documento_processado.pdf", pdf_final)
-
-    buffer_zip.seek(0)
-    return buffer_zip.getvalue()
-
-
-# ============================================================
-# INTERFACE STREAMLIT
+# STREAMLIT
 # ============================================================
 
 st.set_page_config(
@@ -257,211 +345,163 @@ st.set_page_config(
     layout="wide"
 )
 
-inicializar_sliders()
-
-st.title("📄 DOCSCAN PI")
+st.title("DOCSCAN PI")
 st.write(
-    "Ferramenta de digitalização e melhoria de documentos usando "
-    "Processamento de Imagens com Python, OpenCV e Streamlit."
+    "Scanner automático de documentos com OpenCV e Streamlit. "
+    "A aplicação detecta a folha, corrige a perspectiva e só depois aplica "
+    "os filtros de melhoria."
 )
 
-st.markdown("---")
+st.sidebar.header("Modo de saída")
 
+modo_saida = st.sidebar.selectbox(
+    "Resultado final",
+    [
+        "Automático inteligente",
+        "Colorido recortado",
+        "Cinza aprimorado",
+        "Scanner P&B"
+    ]
+)
 
-# ============================================================
-# UPLOAD
-# ============================================================
+st.sidebar.header("Ajustes avançados")
+
+with st.sidebar.expander("Detecção do documento", expanded=False):
+    canny_min = st.slider("Canny mínimo", 0, 255, 50)
+    canny_max = st.slider("Canny máximo", 0, 255, 150)
+
+with st.sidebar.expander("Legibilidade", expanded=False):
+    brilho = st.slider("Brilho", -50, 80, 8)
+    contraste = st.slider("Contraste", 0.6, 2.0, 1.15, 0.05)
+
+with st.sidebar.expander("Scanner P&B", expanded=False):
+    bloco = st.slider("Bloco adaptativo", 3, 99, 31, step=2)
+    constante = st.slider("Constante adaptativa", 0, 30, 11)
 
 arquivo = st.file_uploader(
-    "Carregue uma imagem de documento",
-    type=["jpg", "jpeg", "png"],
-    key="upload_imagem"
+    "Carregue uma foto de documento",
+    type=["jpg", "jpeg", "png", "bmp", "webp"]
 )
 
+if arquivo is None:
+    st.info("Envie uma imagem para iniciar o processamento.")
+    st.stop()
 
-# ============================================================
-# SIDEBAR COM SLIDERS E BOTÃO DE RESET
-# ============================================================
+imagem_pil = Image.open(arquivo).convert("RGB")
+imagem_rgb = np.array(imagem_pil)
 
-st.sidebar.header("Ajustes do processamento")
-
-if st.sidebar.button("Resetar filtros"):
-    resetar_sliders()
-    st.rerun()
-
-st.sidebar.slider(
-    "Brilho",
-    min_value=-100,
-    max_value=100,
-    key="brilho"
+detecao = detectar_documento(
+    imagem_rgb,
+    canny_min=canny_min,
+    canny_max=canny_max
 )
 
-st.sidebar.slider(
-    "Contraste",
-    min_value=0.5,
-    max_value=3.0,
-    step=0.1,
-    key="contraste"
-)
+documento_rgb = detecao["documento"]
 
-st.sidebar.slider(
-    "Filtro Gaussiano",
-    min_value=3,
-    max_value=15,
-    step=2,
-    key="tamanho_kernel"
-)
-
-st.sidebar.slider(
-    "Threshold global",
-    min_value=0,
-    max_value=255,
-    key="threshold_valor"
-)
-
-st.sidebar.slider(
-    "Canny - Limiar inferior",
-    min_value=0,
-    max_value=255,
-    key="canny_limiar1"
-)
-
-st.sidebar.slider(
-    "Canny - Limiar superior",
-    min_value=0,
-    max_value=255,
-    key="canny_limiar2"
-)
-
-st.sidebar.slider(
-    "Bloco da limiarização adaptativa",
-    min_value=3,
-    max_value=99,
-    step=2,
-    key="bloco"
-)
-
-st.sidebar.slider(
-    "Constante da limiarização adaptativa",
-    min_value=0,
-    max_value=30,
-    key="constante"
-)
-
-
-# ============================================================
-# PROCESSAMENTO
-# ============================================================
-
-if arquivo is not None:
-    imagem_pil = Image.open(arquivo).convert("RGB")
-    imagem_rgb = np.array(imagem_pil)
-
-    etapas = processar_documento(
-        imagem_rgb,
-        brilho=st.session_state.brilho,
-        contraste=st.session_state.contraste,
-        threshold_valor=st.session_state.threshold_valor,
-        tamanho_kernel=st.session_state.tamanho_kernel,
-        canny_limiar1=st.session_state.canny_limiar1,
-        canny_limiar2=st.session_state.canny_limiar2,
-        bloco=st.session_state.bloco,
-        constante=st.session_state.constante
+if detecao["detectado"]:
+    st.success("Documento detectado automaticamente. Perspectiva corrigida.")
+else:
+    st.warning(
+        "Não foi possível detectar automaticamente as bordas do documento. "
+        "Tente uma foto com melhor contraste entre documento e fundo."
     )
 
-    st.subheader("Comparação antes e depois")
+resultado = gerar_resultado_final(
+    documento_rgb,
+    modo=modo_saida,
+    brilho=brilho,
+    contraste=contraste,
+    bloco=bloco,
+    constante=constante
+)
 
-    col1, col2 = st.columns(2)
+st.subheader("Comparação principal")
 
-    with col1:
-        st.image(
-            etapas["01_original"],
-            caption="Imagem original",
-            width=420
-        )
+col1, col2 = st.columns(2)
+
+with col1:
+    st.image(imagem_rgb, caption="Imagem original", use_container_width=True)
+
+with col2:
+    st.image(
+        resultado["final"],
+        caption=f"Resultado final - {resultado['modo_final']}",
+        use_container_width=True
+    )
+
+st.subheader("Pipeline automático")
+
+etapas = {
+    "01_original": imagem_rgb,
+    "02_bordas_canny": detecao["bordas"],
+    "03_bordas_dilatadas": detecao["bordas_dilatadas"],
+    "04_documento_recortado_colorido": resultado["colorido"],
+    "05_cinza_aprimorado": resultado["cinza_aprimorado"],
+    "06_scanner_preto_e_branco": resultado["scanner_pb"],
+    "07_resultado_final": resultado["final"],
+}
+
+titulos = {
+    "01_original": "Imagem original",
+    "02_bordas_canny": "Canny para detecção",
+    "03_bordas_dilatadas": "Bordas dilatadas",
+    "04_documento_recortado_colorido": "Documento recortado / perspectiva",
+    "05_cinza_aprimorado": "Cinza aprimorado",
+    "06_scanner_preto_e_branco": "Scanner P&B suave",
+    "07_resultado_final": "Resultado final"
+}
+
+colunas = st.columns(3)
+
+for indice, (nome, imagem) in enumerate(etapas.items()):
+    with colunas[indice % 3]:
+        st.markdown(f"**{titulos[nome]}**")
+        st.image(imagem, use_container_width=True)
 
         st.download_button(
-            label="Baixar imagem original",
-            data=converter_para_download(etapas["01_original"]),
-            file_name="01_original.png",
-            mime="image/png"
+            label="Baixar PNG",
+            data=imagem_para_png(imagem),
+            file_name=f"{nome}.png",
+            mime="image/png",
+            key=f"download_{nome}"
         )
 
-    with col2:
-        st.image(
-            etapas["10_imagem_final_scanner"],
-            caption="Imagem final processada - estilo scanner",
-            width=420,
-            channels="GRAY"
-        )
+st.subheader("Downloads")
 
-        st.download_button(
-            label="Baixar imagem final em PNG",
-            data=converter_para_download(etapas["10_imagem_final_scanner"]),
-            file_name="10_imagem_final_scanner.png",
-            mime="image/png"
-        )
+col_png, col_pdf, col_zip = st.columns(3)
 
-        st.download_button(
-            label="Baixar imagem final em PDF",
-            data=gerar_pdf_da_imagem(etapas["10_imagem_final_scanner"]),
-            file_name="documento_processado.pdf",
-            mime="application/pdf"
-        )
-
-    st.markdown("---")
-
-    st.subheader("Download geral")
-
+with col_png:
     st.download_button(
-        label="Baixar todas as imagens e o PDF em ZIP",
-        data=gerar_zip_com_imagens(etapas),
-        file_name="docscan_resultados.zip",
+        "Baixar resultado final PNG",
+        data=imagem_para_png(resultado["final"]),
+        file_name="docscan_resultado_final.png",
+        mime="image/png"
+    )
+
+with col_pdf:
+    st.download_button(
+        "Baixar resultado final PDF",
+        data=imagem_para_pdf(resultado["final"]),
+        file_name="docscan_resultado_final.pdf",
+        mime="application/pdf"
+    )
+
+with col_zip:
+    st.download_button(
+        "Baixar ZIP com todas as imagens",
+        data=gerar_zip(etapas),
+        file_name="docscan_pi_resultados.zip",
         mime="application/zip"
     )
 
-    st.markdown("---")
+st.markdown("---")
 
-    st.subheader("Etapas do processamento")
+st.markdown(
+    """
+### Fluxo aplicado
 
-    nomes_legiveis = {
-        "02_escala_cinza": "1. Escala de cinza",
-        "03_equalizacao_histograma": "2. Equalização de histograma",
-        "04_brilho_contraste": "3. Ajuste de brilho e contraste",
-        "05_filtro_gaussiano": "4. Filtro Gaussiano",
-        "06_bordas_canny": "5. Detecção de bordas - Canny",
-        "07_threshold_global": "6. Threshold global",
-        "08_limiarizacao_otsu": "7. Limiarização de Otsu",
-        "09_limiarizacao_adaptativa": "8. Limiarização adaptativa",
-        "10_imagem_final_scanner": "9. Resultado final estilo scanner"
-    }
-
-    itens = list(nomes_legiveis.items())
-
-    for i in range(0, len(itens), 3):
-        col_a, col_b, col_c = st.columns(3)
-
-        for coluna, item in zip([col_a, col_b, col_c], itens[i:i + 3]):
-            nome_arquivo, titulo = item
-
-            with coluna:
-                st.markdown(f"**{titulo}**")
-
-                st.image(
-                    etapas[nome_arquivo],
-                    width=280,
-                    channels="GRAY"
-                )
-
-                st.download_button(
-                    label="Baixar PNG",
-                    data=converter_para_download(etapas[nome_arquivo]),
-                    file_name=f"{nome_arquivo}.png",
-                    mime="image/png",
-                    key=f"download_{nome_arquivo}"
-                )
-
-    st.success("Processamento concluído com sucesso.")
-
-else:
-    st.info("Envie uma imagem para iniciar o processamento.")
+Imagem original → pré-processamento → escala de cinza → suavização → Canny → contornos →
+maior quadrilátero → perspectiva → documento recortado → correção de iluminação →
+melhoria de contraste → scanner final.
+"""
+)
