@@ -240,9 +240,6 @@ st.set_page_config(
 
 inicializar_sliders()
 
-if "arquivo_carregado_anteriormente" not in st.session_state:
-    st.session_state.arquivo_carregado_anteriormente = False
-
 st.title("📄 DOCSCAN PI")
 st.write(
     "Ferramenta de digitalização e melhoria de documentos usando "
@@ -250,6 +247,11 @@ st.write(
 )
 
 st.markdown("---")
+
+
+# ============================================================
+# UPLOAD
+# ============================================================
 
 arquivo = st.file_uploader(
     "Carregue uma imagem de documento",
@@ -259,23 +261,14 @@ arquivo = st.file_uploader(
 
 
 # ============================================================
-# RESET AUTOMÁTICO DOS SLIDERS AO REMOVER O ARQUIVO
-# ============================================================
-
-if arquivo is None and st.session_state.arquivo_carregado_anteriormente:
-    resetar_sliders()
-    st.session_state.arquivo_carregado_anteriormente = False
-    st.rerun()
-
-if arquivo is not None:
-    st.session_state.arquivo_carregado_anteriormente = True
-
-
-# ============================================================
-# SIDEBAR COM SLIDERS
+# SIDEBAR COM SLIDERS E BOTÃO DE RESET
 # ============================================================
 
 st.sidebar.header("Ajustes do processamento")
+
+if st.sidebar.button("Resetar filtros"):
+    resetar_sliders()
+    st.rerun()
 
 st.sidebar.slider(
     "Brilho",
@@ -365,7 +358,7 @@ if arquivo is not None:
         st.image(
             etapas["01_original"],
             caption="Imagem original",
-            use_container_width=True
+            width=420
         )
 
         st.download_button(
@@ -379,7 +372,7 @@ if arquivo is not None:
         st.image(
             etapas["10_imagem_final_scanner"],
             caption="Imagem final processada - estilo scanner",
-            use_container_width=True,
+            width=420,
             channels="GRAY"
         )
 
@@ -417,22 +410,30 @@ if arquivo is not None:
         "10_imagem_final_scanner": "9. Resultado final estilo scanner"
     }
 
-    for nome_arquivo, titulo in nomes_legiveis.items():
-        st.markdown(f"### {titulo}")
+    itens = list(nomes_legiveis.items())
 
-        st.image(
-            etapas[nome_arquivo],
-            use_container_width=True,
-            channels="GRAY"
-        )
+    for i in range(0, len(itens), 3):
+        col_a, col_b, col_c = st.columns(3)
 
-        st.download_button(
-            label=f"Baixar {titulo}",
-            data=converter_para_download(etapas[nome_arquivo]),
-            file_name=f"{nome_arquivo}.png",
-            mime="image/png",
-            key=f"download_{nome_arquivo}"
-        )
+        for coluna, item in zip([col_a, col_b, col_c], itens[i:i + 3]):
+            nome_arquivo, titulo = item
+
+            with coluna:
+                st.markdown(f"**{titulo}**")
+
+                st.image(
+                    etapas[nome_arquivo],
+                    width=280,
+                    channels="GRAY"
+                )
+
+                st.download_button(
+                    label="Baixar",
+                    data=converter_para_download(etapas[nome_arquivo]),
+                    file_name=f"{nome_arquivo}.png",
+                    mime="image/png",
+                    key=f"download_{nome_arquivo}"
+                )
 
     st.success("Processamento concluído com sucesso.")
 
