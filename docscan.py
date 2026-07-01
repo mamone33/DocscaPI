@@ -216,6 +216,22 @@ def converter_para_download(imagem):
     return buffer.getvalue()
 
 
+def gerar_pdf_da_imagem(imagem):
+    """
+    Gera um arquivo PDF a partir da imagem final processada.
+    """
+    imagem_pil = Image.fromarray(imagem)
+
+    if imagem_pil.mode != "RGB":
+        imagem_pil = imagem_pil.convert("RGB")
+
+    buffer_pdf = BytesIO()
+    imagem_pil.save(buffer_pdf, format="PDF", resolution=100.0)
+    buffer_pdf.seek(0)
+
+    return buffer_pdf.getvalue()
+
+
 def gerar_zip_com_imagens(etapas):
     buffer_zip = BytesIO()
 
@@ -223,6 +239,9 @@ def gerar_zip_com_imagens(etapas):
         for nome, imagem in etapas.items():
             imagem_png = converter_para_download(imagem)
             zip_file.writestr(f"{nome}.png", imagem_png)
+
+        pdf_final = gerar_pdf_da_imagem(etapas["10_imagem_final_scanner"])
+        zip_file.writestr("documento_processado.pdf", pdf_final)
 
     buffer_zip.seek(0)
     return buffer_zip.getvalue()
@@ -377,10 +396,17 @@ if arquivo is not None:
         )
 
         st.download_button(
-            label="Baixar imagem final",
+            label="Baixar imagem final em PNG",
             data=converter_para_download(etapas["10_imagem_final_scanner"]),
             file_name="10_imagem_final_scanner.png",
             mime="image/png"
+        )
+
+        st.download_button(
+            label="Baixar imagem final em PDF",
+            data=gerar_pdf_da_imagem(etapas["10_imagem_final_scanner"]),
+            file_name="documento_processado.pdf",
+            mime="application/pdf"
         )
 
     st.markdown("---")
@@ -388,7 +414,7 @@ if arquivo is not None:
     st.subheader("Download geral")
 
     st.download_button(
-        label="Baixar todas as imagens em ZIP",
+        label="Baixar todas as imagens e o PDF em ZIP",
         data=gerar_zip_com_imagens(etapas),
         file_name="docscan_resultados.zip",
         mime="application/zip"
@@ -428,7 +454,7 @@ if arquivo is not None:
                 )
 
                 st.download_button(
-                    label="Baixar",
+                    label="Baixar PNG",
                     data=converter_para_download(etapas[nome_arquivo]),
                     file_name=f"{nome_arquivo}.png",
                     mime="image/png",
